@@ -92,8 +92,10 @@ def fill_template(template_path: Path, data: QuoteData, output_path: Path) -> Pa
     _fill_named_list(doc, "Assumptions", data.assumptions)
     _fill_named_list(doc, "Pending Clarifications", data.pending_clarifications)
 
+    # EXCLUSIONS is empty-by-default in the template.
+    # If Claude returns any, create bullets from scratch under the heading.
     if data.additional_exclusions:
-        _append_to_named_list(doc, "EXCLUSIONS", data.additional_exclusions)
+        _insert_bullets_under_heading(doc, "EXCLUSIONS", data.additional_exclusions)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
@@ -121,18 +123,30 @@ def _is_pricing_table(table: Table) -> bool:
 
 
 def _fill_pricing_table(table: Table, data: QuoteData) -> None:
+    """Fill the Amount column in the pricing table.
+
+    The pricing table layout is: [#, Description, Amount].
+    Row 0 is the header, rows 1/2 are Material / Labor & Equipment,
+    row 3 is TOTAL.
+    """
+    headers = [c.text.strip().lower() for c in table.rows[0].cells]
+    try:
+        amt = headers.index("amount")
+    except ValueError:
+        return
+
     if len(table.rows) > 1 and data.material_amount:
-        _set_cell_text(table.rows[1].cells[2], data.material_amount)
+        _set_cell_text(table.rows[1].cells[amt], data.material_amount)
     if len(table.rows) > 2 and data.labor_equipment_amount:
-        _set_cell_text(table.rows[2].cells[2], data.labor_equipment_amount)
+        _set_cell_text(table.rows[2].cells[amt], data.labor_equipment_amount)
     if len(table.rows) > 3 and data.total_amount:
-        _set_cell_text(table.rows[3].cells[2], data.total_amount, bold=True)
+        _set_cell_text(table.rows[3].cells[amt], data.total_amount, bold=True)
 
 
 def _fill_scope_section(doc: _Doc, data: QuoteData) -> None:
     paragraphs = doc.paragraphs
     for i, p in enumerate(paragraphs):
-        if p.text.strip().startswith("ICE Contractors, Inc. proposes") and data.scope_intro:
+        if p.text.strip().startswith("ICE Contractors, Inc") and data.scope_intro:
             _replace_paragraph_text(p, data.scope_intro)
             break
 
@@ -140,11 +154,12 @@ def _fill_scope_section(doc: _Doc, data: QuoteData) -> None:
     in_scope = False
     for p in paragraphs:
         txt = p.text.strip()
-        if txt.upper() == "SCOPE OF WORK":
+        up = txt.upper()
+        if up == "SCOPE OF WORK":
             in_scope = True
             blank_bullets = []
             continue
-        if in_scope and txt.upper() in ("LUMP SUM PRICE", "PRICING"):
+        if in_scope and up in ("LUMP SUM PRICE", "PRICING", "ESTIMATED CREW & SCHEDULE"):
             _populate_bullets(blank_bullets, data.scope_bullets)
             in_scope = False
             blank_bullets = []
@@ -163,8 +178,18 @@ def _replace_paragraph_text(p: Paragraph, new_text: str) -> None:
 
 
 def _populate_bullets(blank_paragraphs: List[Paragraph], values: List[str]) -> None:
-    for p, val in zip(blank_paragraphs, values):
-        _replace_paragraph_text(p, val)
+    """Populate '___' placeholder bullets with values.
+
+    Behavior:
+      - If values == blanks: one-to-one replacement.
+      - If values > blanks: replace all blanks, clone the last blank to fit the rest.
+      - If values < blanks: replace the first N, DELETE leftover placeholders
+        (prevents stray "___" lines in the final draft).
+    """
+    n = min(len(blank_paragraphs), len(values))
+    for idx in range(n):
+        _replace_paragraph_text(blank_paragraphs[idx], values[idx])
+
     if len(values) > len(blank_paragraphs) and blank_paragraphs:
         last = blank_paragraphs[-1]
         for val in values[len(blank_paragraphs):]:
@@ -173,6 +198,12 @@ def _populate_bullets(blank_paragraphs: List[Paragraph], values: List[str]) -> N
             new_para = Paragraph(new_p, last._parent)
             _replace_paragraph_text(new_para, val)
             last = new_para
+    elif len(values) < len(blank_paragraphs):
+        # Delete unused "___" placeholders so they don't appear in the draft.
+        for p in blank_paragraphs[len(values):]:
+            parent = p._element.getparent()
+            if parent is not None:
+                parent.remove(p._element)
 
 
 def _fill_scope_categories(doc: _Doc, data: QuoteData) -> None:
@@ -241,26 +272,72 @@ def _fill_named_list(doc: _Doc, heading: str, items: List[str]) -> None:
         i += 1
 
 
-def _append_to_named_list(doc: _Doc, heading: str, items: List[str]) -> None:
+def _is_list_bullet(p: Paragraph) -> bool:
+    """Return True if this paragraph uses list numbering (bullets)."""
+    pPr = p._element.find(qn("w:pPr"))
+    if pPr is None:
+        return False
+    return pPr.find(qn("w:numPr")) is not None
+
+
+def _find_template_bullet(doc: _Doc) -> Optional[Paragraph]:
+    """Find any bullet paragraph we can clone to inject new ones."""
+    for p in doc.paragraphs:
+        if _is_list_bullet(p) and p.text.strip():
+            return p
+    return None
+
+
+def _insert_bullets_under_heading(doc: _Doc, heading: str, items: List[str]) -> None:
+    """Insert bullet paragraphs right after `heading`, cloning an existing
+    bullet's formatting. Safe to call when the section has zero existing bullets.
+    """
+    if not items:
+        return
     paragraphs = doc.paragraphs
+    heading_p: Optional[Paragraph] = None
+    heading_idx = -1
     for i, p in enumerate(paragraphs):
         if p.text.strip().upper() == heading.upper():
-            last_bullet: Optional[Paragraph] = None
-            j = i + 1
-            while j < len(paragraphs):
-                t = paragraphs[j].text.strip()
-                up = t.upper()
-                if up in ("AUTHORIZATION",) or up.startswith("ATTACHMENT "):
-                    break
-                if t:
-                    last_bullet = paragraphs[j]
-                j += 1
-            if last_bullet is None:
-                return
-            for val in items:
-                new_p = copy.deepcopy(last_bullet._element)
-                last_bullet._element.addnext(new_p)
-                new_para = Paragraph(new_p, last_bullet._parent)
-                _replace_paragraph_text(new_para, val)
-                last_bullet = new_para
-            return
+            heading_p = p
+            heading_idx = i
+            break
+    if heading_p is None:
+        return
+
+    # Prefer the last existing bullet inside this section (for consistent formatting),
+    # otherwise fall back to any bullet elsewhere in the doc (T&C typically).
+    section_bullet: Optional[Paragraph] = None
+    for j in range(heading_idx + 1, len(paragraphs)):
+        t = paragraphs[j].text.strip()
+        up = t.upper()
+        if up in ("AUTHORIZATION",) or up.startswith("ATTACHMENT "):
+            break
+        if _is_list_bullet(paragraphs[j]):
+            section_bullet = paragraphs[j]
+
+    template_bullet = section_bullet or _find_template_bullet(doc)
+    if template_bullet is None:
+        # Last resort: create plain paragraphs after the heading.
+        insert_after = heading_p
+        for val in items:
+            new_para = insert_after._parent.add_paragraph(val)
+            # python-docx's add_paragraph appends to end of parent — reposition it
+            insert_after._element.addnext(new_para._element)
+            insert_after = new_para
+        return
+
+    insert_after = heading_p
+    for val in items:
+        new_p = copy.deepcopy(template_bullet._element)
+        insert_after._element.addnext(new_p)
+        new_para = Paragraph(new_p, insert_after._parent)
+        _replace_paragraph_text(new_para, val)
+        insert_after = new_para
+
+
+def _append_to_named_list(doc: _Doc, heading: str, items: List[str]) -> None:
+    """Back-compat shim — delegates to the new _insert_bullets_under_heading
+    so empty sections (like the new EXCLUSIONS) still get bullets created.
+    """
+    _insert_bullets_under_heading(doc, heading, items)

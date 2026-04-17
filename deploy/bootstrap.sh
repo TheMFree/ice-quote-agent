@@ -10,7 +10,7 @@
 #   MS_CLIENT_ID        — Azure AD app (client) GUID
 #   MS_CLIENT_SECRET    — Azure AD client secret value
 #   AGENT_MAILBOX       — mailbox to poll (e.g. quotes@ice-contractors.com)
-#   REVIEWER_EMAIL      — draft recipient (e.g. mgfjr@bellsouth.net)
+#   REVIEWER_EMAIL      — draft recipient (e.g. info@ice-contractors.com)
 #
 # One-liner (fill in secrets inline):
 #
@@ -19,7 +19,7 @@
 #          MS_CLIENT_ID='...' \
 #          MS_CLIENT_SECRET='...' \
 #          AGENT_MAILBOX='quotes@ice-contractors.com' \
-#          REVIEWER_EMAIL='mgfjr@bellsouth.net'
+#          REVIEWER_EMAIL='info@ice-contractors.com'
 #   curl -fsSL https://raw.githubusercontent.com/TheMFree/ice-quote-agent/main/deploy/bootstrap.sh | bash
 #
 # When it finishes successfully, the agent will be running under systemd
@@ -62,7 +62,7 @@ prompt_secret MS_TENANT_ID      "Microsoft tenant id (GUID)"             0
 prompt_secret MS_CLIENT_ID      "Microsoft app (client) id (GUID)"       0
 prompt_secret MS_CLIENT_SECRET  "Microsoft client secret value"          1
 prompt_secret AGENT_MAILBOX     "Agent mailbox (quotes@ice-contractors.com)" 0
-prompt_secret REVIEWER_EMAIL    "Reviewer email (mgfjr@bellsouth.net)"   0
+prompt_secret REVIEWER_EMAIL    "Reviewer email (info@ice-contractors.com)" 0
 
 echo "==> Installing OS packages..."
 export DEBIAN_FRONTEND=noninteractive
@@ -101,10 +101,20 @@ python3 -m venv "${INSTALL_DIR}/.venv"
 "${INSTALL_DIR}/.venv/bin/pip" install --upgrade pip wheel
 "${INSTALL_DIR}/.venv/bin/pip" install -r "${INSTALL_DIR}/requirements.txt"
 
-echo "==> Generating proposal template..."
-cd "${INSTALL_DIR}"
-"${INSTALL_DIR}/.venv/bin/python" "${INSTALL_DIR}/build_template.py"
-cd /
+echo "==> Decoding proposal template from committed base64 parts..."
+TEMPLATE_DIR="${INSTALL_DIR}/templates"
+TEMPLATE_DOCX="${TEMPLATE_DIR}/ICE_Contractors_Proposal_Template.docx"
+PARTS=( "${TEMPLATE_DIR}"/ICE_Contractors_Proposal_Template.docx.b64.part_* )
+if (( ${#PARTS[@]} > 0 )) && [[ -f "${PARTS[0]}" ]]; then
+  # Sort ensures part_00, part_01, ... are concatenated in the right order.
+  cat $(printf '%s\n' "${PARTS[@]}" | sort) | base64 -d > "${TEMPLATE_DOCX}"
+  echo "    wrote ${TEMPLATE_DOCX} ($(stat -c%s "${TEMPLATE_DOCX}") bytes)"
+else
+  echo "    WARNING: no template parts found — falling back to legacy build_template.py"
+  cd "${INSTALL_DIR}"
+  "${INSTALL_DIR}/.venv/bin/python" "${INSTALL_DIR}/build_template.py" || true
+  cd /
+fi
 
 echo "==> Writing ${INSTALL_DIR}/.env ..."
 umask 077
