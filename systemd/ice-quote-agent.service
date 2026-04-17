@@ -1,0 +1,25 @@
+[Unit]
+Description=ICE Quote Agent — autonomous email-to-proposal pipeline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=iceagent
+Group=iceagent
+WorkingDirectory=/opt/ice-quote-agent
+EnvironmentFile=/opt/ice-quote-agent/.env
+ExecStart=/opt/ice-quote-agent/.venv/bin/python run_agent.py
+Restart=on-failure
+RestartSec=15
+StandardOutput=append:/var/log/ice-quote-agent/agent.log
+StandardError=append:/var/log/ice-quote-agent/agent.log
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

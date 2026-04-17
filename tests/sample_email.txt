@@ -1,0 +1,27 @@
+Subject: Quote request - Baron #3 Warehouse Electrical Upgrade
+---
+Hey Michael,
+
+Got the high-level scope for the Hitachi Energy - Baron #3 job in Richland, MS.
+Owner-furnished 2000A QED-2 switchboard coming in, we set and connect.
+
+Scope as I understand it:
+- Set and connect 2000A main switchboard (owner-furnished)
+- New 1200A MDP fed via cable tray (4 sets 500 kcmil VNTC TC-ER)
+- New 600A and 400A sub-panels
+- 75 kVA dry-type transformer (480 -> 208Y/120)
+- HVAC disconnect installation (3 units)
+- Compressor feeders (2 x Quincy QSI-50)
+- 24" aluminum cable tray extension, ~120 LF
+- Testing, megger, phasing, commissioning
+
+Pricing I'm quoting:
+  Material:            $269,270.00
+  Labor & Equipment:   $202,363.00
+  TOTAL:               $471,633.00
+
+Schedule: 4-10s, estimated 6 weeks on site.
+
+Let me know if you need anything else. Thanks.
+
+- Joe
