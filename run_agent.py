@@ -4,13 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shutil
 import signal
+import subprocess
 import sys
 import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from agent.config import load_settings
 from agent.email_client import GraphClient, IncomingEmail, EmailAttachment
@@ -23,6 +25,44 @@ from agent.schema import QuoteData
 
 def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "quote"
+
+
+def _find_soffice() -> Optional[str]:
+    """Return path to a LibreOffice headless binary, or None if not installed."""
+    for candidate in ("libreoffice", "soffice"):
+        path = shutil.which(candidate)
+        if path:
+            return path
+    return None
+
+
+def _convert_to_pdf(docx_path: Path, log) -> Optional[Path]:
+    """Convert .docx to .pdf via LibreOffice headless. Returns pdf path or None."""
+    soffice = _find_soffice()
+    if not soffice:
+        log.warning("LibreOffice (soffice/libreoffice) not found on PATH; "
+                    "skipping PDF generation.")
+        return None
+    try:
+        result = subprocess.run(
+            [soffice, "--headless", "--convert-to", "pdf",
+             "--outdir", str(docx_path.parent), str(docx_path)],
+            capture_output=True, text=True, timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("LibreOffice PDF conversion timed out for %s", docx_path.name)
+        return None
+    except Exception:
+        log.exception("LibreOffice PDF conversion raised for %s", docx_path.name)
+        return None
+
+    pdf_path = docx_path.with_suffix(".pdf")
+    if result.returncode == 0 and pdf_path.exists():
+        log.info("PDF generated: %s", pdf_path.name)
+        return pdf_path
+    log.warning("PDF conversion failed (rc=%s): stdout=%s stderr=%s",
+                result.returncode, result.stdout[:200], result.stderr[:200])
+    return None
 
 
 def _review_body(
@@ -60,7 +100,8 @@ def _review_body(
 
     lines += [
         "",
-        "Review the attached .docx, adjust as needed, then forward to "
+        "Review the attached .docx (editable) and .pdf (print/preview), "
+        "adjust as needed, then forward to "
         f"{original_sender} (and the client) yourself.",
         "",
         "--- Original request ---",
@@ -113,6 +154,12 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
         jpath = out_path.with_suffix(".json")
         jpath.write_text(data.model_dump_json(indent=2))
 
+        pdf_path = _convert_to_pdf(out_path, log)
+
+        attachments: List[Path] = [out_path]
+        if pdf_path is not None:
+            attachments.append(pdf_path)
+
         missing = _missing_fields(data)
         body = _review_body(
             data=data,
@@ -130,18 +177,20 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
             )
 
         if settings.dry_run:
-            log.info("[DRY_RUN] Would send review TO=%s (draft %s)",
-                     settings.reviewer_email, out_path.name)
+            log.info("[DRY_RUN] Would send review TO=%s (drafts: %s)",
+                     settings.reviewer_email,
+                     ", ".join(p.name for p in attachments))
         else:
             graph.send_reply(
                 to=settings.reviewer_email,
                 cc=None,
                 subject=review_subject,
                 body_text=body,
-                attachment_path=out_path,
+                attachment_paths=attachments,
                 reply_to_message_id=None,
             )
-            log.info("Review email sent to %s.", settings.reviewer_email)
+            log.info("Review email sent to %s (%d attachments).",
+                     settings.reviewer_email, len(attachments))
 
     return True
 
@@ -158,6 +207,11 @@ def run():
     log = setup_logger(settings.log_file)
     log.info("ICE Quote Agent starting (dry_run=%s, mailbox=%s)",
              settings.dry_run, settings.mailbox or "<not set>")
+    if _find_soffice():
+        log.info("LibreOffice detected — PDF generation enabled.")
+    else:
+        log.warning("LibreOffice not detected — PDF generation disabled. "
+                    "Install with: apt install libreoffice --no-install-recommends")
     settings.output_dir.mkdir(parents=True, exist_ok=True)
 
     if not (settings.tenant_id and settings.client_id and
@@ -211,6 +265,9 @@ def run_once_from_text(subject: str, body: str, sender: str,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fill_template(settings.template_path, data, out_path)
     print(f"Wrote {out_path}")
+    pdf_path = _convert_to_pdf(out_path, log)
+    if pdf_path:
+        print(f"Wrote {pdf_path}")
 
 
 def main():
