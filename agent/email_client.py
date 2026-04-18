@@ -9,7 +9,7 @@ import logging
 import mimetypes
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence, Union
 
 import requests
 from msal import ConfidentialClientApplication
@@ -120,18 +120,29 @@ class GraphClient:
         cc: Optional[str],
         subject: str,
         body_text: str,
-        attachment_path: Optional[Path] = None,
+        attachment_paths: Optional[Sequence[Path]] = None,
         reply_to_message_id: Optional[str] = None,
+        # Back-compat: older callers may still pass attachment_path=
+        attachment_path: Optional[Path] = None,
     ) -> None:
+        paths: List[Path] = []
+        if attachment_paths:
+            paths.extend([p for p in attachment_paths if p is not None])
+        if attachment_path is not None:
+            paths.append(attachment_path)
+
         attachments_payload = []
-        if attachment_path is not None and attachment_path.exists():
-            with open(attachment_path, "rb") as f:
+        for p in paths:
+            if not p.exists():
+                log.warning("Attachment missing, skipping: %s", p)
+                continue
+            with open(p, "rb") as f:
                 b64 = base64.b64encode(f.read()).decode("ascii")
             attachments_payload.append({
                 "@odata.type": "#microsoft.graph.fileAttachment",
-                "name": attachment_path.name,
+                "name": p.name,
                 "contentBytes": b64,
-                "contentType": mimetypes.guess_type(attachment_path.name)[0] or
+                "contentType": mimetypes.guess_type(p.name)[0] or
                                "application/octet-stream",
             })
 
