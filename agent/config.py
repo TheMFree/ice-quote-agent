@@ -25,6 +25,7 @@ def _bool(name: str, default: bool = False) -> bool:
 class Settings:
     anthropic_api_key: str
     claude_model: str
+    openai_api_key: str
     tenant_id: str
     client_id: str
     client_secret: str
@@ -43,6 +44,7 @@ def load_settings() -> Settings:
     return Settings(
         anthropic_api_key=_get("ANTHROPIC_API_KEY", required=True),
         claude_model=_get("CLAUDE_MODEL", "claude-sonnet-4-6"),
+        openai_api_key=_get("OPENAI_API_KEY", required=False),
         tenant_id=_get("MS_TENANT_ID", required=False),
         client_id=_get("MS_CLIENT_ID", required=False),
         client_secret=_get("MS_CLIENT_SECRET", required=False),
