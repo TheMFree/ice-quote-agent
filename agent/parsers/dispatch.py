@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Literal
 
-from . import pdf_parser, docx_parser, image_parser, text_parser
+from . import pdf_parser, docx_parser, image_parser, text_parser, audio_parser
 
 log = logging.getLogger("ice_quote_agent")
 
@@ -46,6 +46,12 @@ _EXT_MAP = {
     ".jpg": "image", ".jpeg": "image", ".png": "image",
     ".gif": "image", ".webp": "image", ".bmp": "image",
     ".tif": "image", ".tiff": "image",
+    # Voice-memo / audio formats accepted by Whisper.
+    ".m4a": "audio", ".mp3": "audio", ".wav": "audio",
+    ".ogg": "audio", ".oga": "audio", ".opus": "audio",
+    ".webm": "audio", ".flac": "audio", ".amr": "audio",
+    ".3gp": "audio", ".3gpp": "audio", ".aac": "audio",
+    ".mp4": "audio",  # iOS sometimes wraps voice memos in mp4 container
 }
 
 
@@ -57,6 +63,8 @@ def _kind_for(path: Path) -> str:
     if mime:
         if mime.startswith("image/"):
             return "image"
+        if mime.startswith("audio/"):
+            return "audio"
         if mime == "application/pdf":
             return "pdf"
         if "word" in mime:
@@ -79,6 +87,8 @@ def parse_attachment(path: Path) -> ParsedContent:
             image_parser.parse(path, out)
         elif kind == "text":
             text_parser.parse(path, out)
+        elif kind == "audio":
+            audio_parser.parse(path, out)
         else:
             log.warning("Skipping unsupported attachment: %s", path.name)
     except Exception as e:
