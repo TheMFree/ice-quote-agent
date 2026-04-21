@@ -1,26 +1,29 @@
-"""Polish — final-gate document QA for the Quote Agent.
+"""Polish — silent final-gate QA for the Quote Agent.
 
-Runs a deterministic style linter (regex-based) plus a Claude-powered
-linguistic pass (grammar, awkward phrasing, parallel structure, voice) over
-the filled proposal and returns a PolishResult the main loop can use to
-decide how to present the review email.
+Catches MAJOR, UNPROFESSIONAL errors and corrects them silently in the
+filled proposal. No tracked changes. No punch list. No email report.
 
-Produces:
-- A tracked-changes .docx where every edit is attributed to "Polish"
-- A punch-list markdown string the main loop pastes into the email body
-- A grade (A/B/C/D) based on finding count
+Rules enforced (deterministic):
+- I&E / T&M spelled with ampersand (not 'I and E', 'I & E', etc.)
+- Straight quotes -> smart quotes (apostrophes and double quotes)
+- Double spaces collapsed to single
+- Doubled words ('the the') de-duplicated
+- Exclamation points -> periods (formal prose)
+- Contractions expanded ('don't' -> 'do not')
+- Currency normalized to two decimals ('$1,234' -> '$1,234.00')
 
-House style baked in:
-- Oxford comma: always
-- I&E / T&M: ampersand, no spaces
-- Currency: $1,234.56 (two decimals always)
-- Dates (prose): January 1, 2026
-- Smart quotes, em-dash, ellipsis
-- No double spaces, no exclamation in formal prose, no contractions
+Also runs a Claude-powered pass to catch typos / grammar errors /
+wrong-word errors / broken sentences that regex cannot see. Applied
+silently where the replacement is short enough to fit a single run.
 
-Mirrors the Polish skill at ~/.claude/skills/polish/. Rules are vendored
-here so the agent is self-contained; the skill remains the canonical
-style reference for interactive use.
+Style preferences that are NOT ship-blockers (Oxford comma, date format,
+em-dash vs --, ellipsis character, hyphen vs en-dash in ranges) are
+deliberately NOT enforced here - those belong in the interactive Polish
+skill, not in the Quote Agent's silent gate.
+
+Public API:
+    result = run_polish(docx_path, anthropic_api_key=..., model=...)
+    # result.polished_docx points at a clean corrected file (or None)
 """
 from __future__ import annotations
 
@@ -45,7 +48,7 @@ log = logging.getLogger("ice_quote_agent")
 
 @dataclass
 class Finding:
-    rule: str          # e.g. "R01-oxford-comma" or "L-grammar"
+    rule: str          # e.g. "R02-ie-format" or "L-typo"
     line: int
     col: int
     current: str
@@ -63,9 +66,9 @@ class Finding:
 
 @dataclass
 class PolishResult:
-    grade: str                                     # "A" / "B" / "C" / "D"
+    grade: str                                     # "A" (no edits) or "B" (applied edits)
     findings: List[Finding] = field(default_factory=list)
-    punch_list_md: str = ""
+    punch_list_md: str = ""                        # always "" in silent mode
     polished_docx: Optional[Path] = None
     clean_docx: Optional[Path] = None
     ran_linguistic_pass: bool = False
@@ -74,18 +77,11 @@ class PolishResult:
     def total_findings(self) -> int:
         return len(self.findings)
 
-    @property
-    def should_ship_tracked(self) -> bool:
-        return self.grade != "A"
-
 
 # ---------------------------------------------------------------------------
-# Deterministic linter (R01–R13)
+# Deterministic linter (major-error rules only)
 # ---------------------------------------------------------------------------
 
-_R01_RE = re.compile(
-    r"(\b\w+\b(?:\s+\w+)*),\s+(\b\w+\b(?:\s+\w+)*)\s+(and|or)\s+(\b\w+\b(?:\s+\w+)*)"
-)
 _R02_VARIANTS = [
     (re.compile(r"\bI and E\b"), "I&E"),
     (re.compile(r"\bI & E\b"), "I&E"),
@@ -100,26 +96,9 @@ _R03_VARIANTS = [
     (re.compile(r"\bt&m\b"), "T&M"),
 ]
 _R04_RE = re.compile(r"\$(\d{1,3}(?:,\d{3})*|\d{4,})(?!\.\d|\d)")
-_R05_NUMERIC_US = re.compile(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b")
-_R05_ISO = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
-_R05_ABBREV = re.compile(
-    r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\.?\s+(\d{1,2}),?\s+(\d{4})\b"
-)
-_MONTH_NAMES = {
-    "Jan": "January", "Feb": "February", "Mar": "March", "Apr": "April",
-    "May": "May", "Jun": "June", "Jul": "July", "Aug": "August",
-    "Sep": "September", "Oct": "October", "Nov": "November", "Dec": "December",
-}
-_ISO_MONTHS = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
 _R06_STRAIGHT_SINGLE = re.compile(r"(?<=\w)'(?=\w)")
 _R06_STRAIGHT_DOUBLE = re.compile(r'(?<![0-9/])"')
-_R07_RE = re.compile(r"(?<!-)--(?!-)")
-_R08_RE = re.compile(r"\.{3,}")
 _R09_RE = re.compile(r"(?<!^)  +")
-_R10_RE = re.compile(r"\b(\d+)-(\d+)\b")
 _R11_RE = re.compile(r"\b(\w+)\s+\1\b", re.IGNORECASE)
 _R12_RE = re.compile(r"!")
 _R13_CONTRACTIONS = {
@@ -148,11 +127,10 @@ def _add(findings: List[Finding], rule: str, line: int, col: int,
 
 
 def _lint_line(ln: int, line: str, findings: List[Finding]) -> None:
-    for m in _R01_RE.finditer(line):
-        _add(findings, "R01-oxford-comma", ln, m.start() + 1,
-             m.group(0),
-             f"{m.group(1)}, {m.group(2)}, {m.group(3)} {m.group(4)}",
-             "Missing Oxford comma.")
+    """Flag only MAJOR, unprofessional errors. Style preferences
+    (Oxford comma, date format, em-dash, ellipsis, hyphen-in-range)
+    are deliberately skipped - they belong in the interactive Polish
+    skill, not in the silent Quote Agent gate."""
     for pat, repl in _R02_VARIANTS:
         for m in pat.finditer(line):
             _add(findings, "R02-ie-format", ln, m.start() + 1,
@@ -170,51 +148,20 @@ def _lint_line(ln: int, line: str, findings: List[Finding]) -> None:
                  raw, f"${val:,}.00", "Currency needs two decimals.")
         except ValueError:
             pass
-    for m in _R05_NUMERIC_US.finditer(line):
-        try:
-            mon, day, year = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if 1 <= mon <= 12 and 1 <= day <= 31:
-                _add(findings, "R05-date-format", ln, m.start() + 1,
-                     m.group(0), f"{_ISO_MONTHS[mon - 1]} {day}, {year}",
-                     "Use long-form date.")
-        except (ValueError, IndexError):
-            pass
-    for m in _R05_ISO.finditer(line):
-        try:
-            year, mon, day = int(m.group(1)), int(m.group(2)), int(m.group(3))
-            if 1 <= mon <= 12 and 1 <= day <= 31:
-                _add(findings, "R05-date-format", ln, m.start() + 1,
-                     m.group(0), f"{_ISO_MONTHS[mon - 1]} {day}, {year}",
-                     "ISO format not for prose.")
-        except (ValueError, IndexError):
-            pass
-    for m in _R05_ABBREV.finditer(line):
-        mon = _MONTH_NAMES.get(m.group(1), m.group(1))
-        suggested = f"{mon} {m.group(2)}, {m.group(3)}"
-        if suggested != m.group(0):
-            _add(findings, "R05-date-format", ln, m.start() + 1,
-                 m.group(0), suggested, "Spell out the month.")
     for m in _R06_STRAIGHT_SINGLE.finditer(line):
         _add(findings, "R06-smart-quotes", ln, m.start() + 1,
              m.group(0), "\u2019", "Use curly apostrophe.")
+    # Straight double quotes: replace with smart double quote.
+    # We can't know from context whether it's opening or closing -
+    # default to left double-quote; Word's autocorrect handles the rest
+    # when the doc is reopened.
     for m in _R06_STRAIGHT_DOUBLE.finditer(line):
         _add(findings, "R06-smart-quotes", ln, m.start() + 1,
-             m.group(0), "\u201C or \u201D", "Use curly double quotes.")
-    for m in _R07_RE.finditer(line):
-        _add(findings, "R07-em-dash", ln, m.start() + 1,
-             m.group(0), "\u2014", "Use em-dash.")
-    for m in _R08_RE.finditer(line):
-        _add(findings, "R08-ellipsis", ln, m.start() + 1,
-             m.group(0), "\u2026", "Use ellipsis character.")
+             '"', "\u201C", "Use curly double quotes.")
     for m in _R09_RE.finditer(line):
+        # Direct replacement: collapse run of spaces to single.
         _add(findings, "R09-double-space", ln, m.start() + 1,
-             repr(m.group(0)), " ", "Collapse to single space.")
-    for m in _R10_RE.finditer(line):
-        a, b = int(m.group(1)), int(m.group(2))
-        if a < b and 1 <= a and b <= 99999:
-            _add(findings, "R10-hyphen-in-range", ln, m.start() + 1,
-                 m.group(0), f"{a}\u2013{b}",
-                 "Ranges use en-dash, not hyphen.")
+             m.group(0), " ", "Collapse to single space.")
     for m in _R11_RE.finditer(line):
         word = m.group(1).lower()
         if word in {"that", "had", "have", "is", "s"} or len(word) <= 2:
@@ -256,7 +203,7 @@ def _extract_prose(docx_path: Path) -> str:
     on failure."""
     pandoc = shutil.which("pandoc")
     if not pandoc:
-        log.warning("pandoc not found — skipping Polish prose extraction.")
+        log.warning("pandoc not found - skipping Polish prose extraction.")
         return ""
     with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as tmp:
         md_path = Path(tmp.name)
@@ -278,37 +225,48 @@ def _extract_prose(docx_path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Linguistic pass (Claude)
+# Linguistic pass (Claude) - major errors only
 # ---------------------------------------------------------------------------
 
 _LINGUISTIC_SYSTEM = """\
-You are Polish — the final-gate document QA auditor for ICE Contractors,
-Inc. You review client-facing proposals for grammar, punctuation,
-spelling, awkward phrasing, parallel-structure breaks in bulleted lists,
-voice-and-tone drift, ambiguity, and redundancy.
+You are Polish - a silent QA gate for ICE Contractors client proposals.
+Your only job is to catch MAJOR, UNPROFESSIONAL errors that would
+embarrass us if the document shipped as-is.
 
-You do NOT enforce mechanical style rules (Oxford comma, I&E, currency
-format, date format, smart quotes, em-dashes) — those are handled by a
-separate deterministic linter. Focus only on issues a regex cannot catch.
+Flag ONLY these:
+- Misspellings / typos (wrong letters, transposed characters)
+- Wrong-word errors (their/there, your/you're, affect/effect, etc.)
+- Grammar errors that break or change meaning (subject-verb
+  disagreement, broken sentence structure)
+- Doubled words a regex missed
+- Broken or incomplete sentences
 
-House voice: we/our for ICE; you/your for the client. Active voice
-preferred. No contractions in formal prose. No exclamation points.
+DO NOT flag:
+- Style preferences (sentence length, word choice, rhetorical flow)
+- Parallel-structure nits
+- Passive vs active voice
+- Mild redundancy
+- Tone or "could be stronger" rewrites
+- Anything the deterministic linter already handles (quotes, em-dash,
+  I&E, T&M, contractions, exclamations, currency, double spaces)
 
-Return a single JSON array of findings. Each finding must have:
-- "issue": short tag, one of: grammar, spelling, awkward, parallel,
-  voice, ambiguous, redundant
-- "current": the exact text as written (a full sentence or bullet)
-- "suggested": your proposed rewrite
-- "note": one-sentence explanation
+Keep the `current` string SHORT - ideally 1-8 words, never a full
+sentence unless the sentence is truly broken. Short spans apply cleanly
+to a docx; long rewrites do not.
 
-Return ONLY the JSON array. No markdown fences, no preamble.
-If you find nothing, return [].
+Return ONLY a JSON array. Each item:
+- "issue": one of: typo, wrong-word, grammar, doubled-word, broken-sentence
+- "current": exact text to replace (SHORT)
+- "suggested": the corrected replacement
+- "note": 1-sentence reason
+
+No markdown fences. No preamble. If nothing qualifies, return [].
 """
 
 
 def _linguistic_pass(prose: str, api_key: str, model: str) -> List[Finding]:
     """Call Claude once to catch what regex cannot. Returns empty list on
-    any failure — linguistic pass is best-effort, never blocks the agent."""
+    any failure - linguistic pass is best-effort, never blocks the agent."""
     if not prose.strip():
         return []
     try:
@@ -350,67 +308,73 @@ def _linguistic_pass(prose: str, api_key: str, model: str) -> List[Finding]:
 
 
 # ---------------------------------------------------------------------------
-# Tracked-changes injection into .docx
+# Silent corrections applied directly to the .docx
 # ---------------------------------------------------------------------------
 
-_START_ID = 9000
+def _xml_unescape(text: str) -> str:
+    """Decode XML entities we see inside <w:t> content before matching."""
+    return (text.replace("&amp;", "&")
+                 .replace("&lt;", "<")
+                 .replace("&gt;", ">")
+                 .replace("&quot;", '"')
+                 .replace("&apos;", "'"))
 
 
 def _xml_escape(text: str) -> str:
+    """Re-encode text for safe insertion into XML."""
     return (text.replace("&", "&amp;")
                  .replace("<", "&lt;")
                  .replace(">", "&gt;"))
 
 
-def _inject_tracked_changes(docx_src: Path, docx_dst: Path,
-                            findings: List[Finding]) -> bool:
-    """Create a copy of docx_src at docx_dst with tracked-change blocks for
-    each deterministic finding whose `current` appears verbatim in a <w:t>.
-    Returns True if at least one change was applied."""
+def _apply_clean_edits(docx_src: Path, docx_dst: Path,
+                       findings: List[Finding]) -> int:
+    """Create docx_dst from docx_src with the finding corrections applied
+    directly to <w:t> text nodes - NO tracked-change markup.
+
+    Both deterministic and linguistic findings are applied, but only where
+    the `current` text is short enough (<= 120 chars) to fit inside a
+    single run. Long sentence-level rewrites are silently skipped.
+
+    Returns the count of edits applied. If zero, docx_dst is still
+    written (a straight copy) so the caller has a single file to attach.
+    """
     import zipfile
-    det = [f for f in findings
-           if f.kind == "deterministic" and f.current and f.suggested
-           and f.current != f.suggested
-           and not f.current.startswith("'") and not f.current.startswith('"')]
-    if not det:
+
+    usable = [
+        f for f in findings
+        if f.current and f.suggested
+        and f.current != f.suggested
+        and len(f.current) <= 120
+    ]
+    if not usable:
         shutil.copyfile(docx_src, docx_dst)
-        return False
+        return 0
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    wid = _START_ID
     applied = 0
-
-    def track_block(old: str, new: str, wid: int) -> str:
-        old_x, new_x = _xml_escape(old), _xml_escape(new)
-        return (
-            f'<w:del w:id="{wid}" w:author="Polish" w:date="{now}">'
-            f'<w:r><w:delText xml:space="preserve">{old_x}</w:delText></w:r>'
-            f'</w:del>'
-            f'<w:ins w:id="{wid + 1}" w:author="Polish" w:date="{now}">'
-            f'<w:r><w:t xml:space="preserve">{new_x}</w:t></w:r>'
-            f'</w:ins>'
-        )
-
     t_re = re.compile(r"(<w:t(?:\s+[^>]*)?>)([^<]*)(</w:t>)")
 
     def _sub(m: re.Match) -> str:
-        nonlocal wid, applied
-        opening, inner, closing = m.group(1), m.group(2), m.group(3)
-        for f in det:
-            if f.current and f.current in inner:
-                # Truncate suggested to just the replaced substring when the
-                # finding `current` is already the exact string. For R01
-                # Oxford-comma findings, `current` is a wide sentence span
-                # and `suggested` is the same span rewritten — that works
-                # here too.
-                prefix, suffix = inner.split(f.current, 1)
-                block = track_block(f.current, f.suggested, wid)
-                wid += 2
+        nonlocal applied
+        opening, inner_xml, closing = m.group(1), m.group(2), m.group(3)
+        # Work on the unescaped text so matches line up with what pandoc
+        # extracted (which is what the findings were computed against).
+        inner = _xml_unescape(inner_xml)
+        changed = False
+        for f in usable:
+            if f.current in inner:
+                inner = inner.replace(f.current, f.suggested)
                 applied += 1
-                return (f"{opening}{prefix}{closing}"
-                        f"</w:r>{block}<w:r>"
-                        f"{opening}{suffix}{closing}")
-        return m.group(0)
+                changed = True
+        if not changed:
+            return m.group(0)
+        # Preserve whitespace when the corrected text has leading/trailing
+        # spaces or we had xml:space already.
+        needs_preserve = inner != inner.strip() or 'xml:space' in opening
+        new_opening = opening
+        if needs_preserve and 'xml:space' not in new_opening:
+            new_opening = new_opening.replace("<w:t", '<w:t xml:space="preserve"', 1)
+        return f"{new_opening}{_xml_escape(inner)}{closing}"
 
     with zipfile.ZipFile(docx_src, "r") as zin:
         members = {n: zin.read(n) for n in zin.namelist()}
@@ -424,67 +388,9 @@ def _inject_tracked_changes(docx_src: Path, docx_dst: Path,
         for name, data in members.items():
             zout.writestr(name, data)
 
-    log.info("Polish: applied %d tracked change(s) to %s",
+    log.info("Polish: applied %d clean edit(s) to %s",
              applied, docx_dst.name)
-    return applied > 0
-
-
-# ---------------------------------------------------------------------------
-# Punch list + grading
-# ---------------------------------------------------------------------------
-
-def _grade(n_det: int, n_ling: int) -> str:
-    """Simple grading heuristic. Linguistic findings weigh more heavily
-    because they indicate real grammar/spelling problems."""
-    score = n_det + 2 * n_ling
-    if score == 0:
-        return "A"
-    if score <= 5:
-        return "B"
-    if score <= 15:
-        return "C"
-    return "D"
-
-
-def _punch_list(findings: List[Finding], grade: str) -> str:
-    det = [f for f in findings if f.kind == "deterministic"]
-    ling = [f for f in findings if f.kind == "linguistic"]
-
-    lines: List[str] = []
-    lines.append(f"**Polish grade: {grade}**  ·  "
-                 f"{len(det)} mechanical, {len(ling)} linguistic "
-                 f"({len(findings)} total)")
-    lines.append("")
-
-    if det:
-        lines.append("**Mechanical style (tracked in the .docx):**")
-        for i, f in enumerate(det[:20], start=1):
-            lines.append(f"  {i}. `{f.rule}` — "
-                         f"`{_truncate(f.current, 60)}` → "
-                         f"`{_truncate(f.suggested, 60)}`")
-        if len(det) > 20:
-            lines.append(f"  _(+{len(det) - 20} more — see tracked-changes .docx)_")
-        lines.append("")
-
-    if ling:
-        lines.append("**Linguistic (suggestions only — not tracked):**")
-        for i, f in enumerate(ling[:15], start=1):
-            tag = f.rule.replace("L-", "")
-            lines.append(f"  {i}. _{tag}_ — {f.note}")
-            lines.append(f"     - As written: {_truncate(f.current, 120)}")
-            lines.append(f"     - Suggested:  {_truncate(f.suggested, 120)}")
-        if len(ling) > 15:
-            lines.append(f"  _(+{len(ling) - 15} more)_")
-        lines.append("")
-
-    lines.append(f"_Polished by Polish v1.0 — "
-                 f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}_")
-    return "\n".join(lines)
-
-
-def _truncate(s: str, n: int) -> str:
-    s = s.replace("\n", " ").replace("`", "'")
-    return s if len(s) <= n else s[: n - 1] + "…"
+    return applied
 
 
 # ---------------------------------------------------------------------------
@@ -495,8 +401,12 @@ def run_polish(docx_path: Path, *, anthropic_api_key: str,
                model: str, run_linguistic: bool = True) -> PolishResult:
     """Run Polish over a filled .docx and return a PolishResult.
 
-    Never raises — on any error the result degrades to grade A (silent) so the
-    agent keeps shipping. Errors are logged.
+    Applies corrections SILENTLY - direct edits to the document text,
+    no tracked changes, no punch list, no email reporting. The caller
+    should attach `polished_docx` if it's not None, else the original.
+
+    Never raises - on any error the result degrades to no-op (grade A,
+    polished_docx=None) so the agent keeps shipping.
     """
     try:
         prose = _extract_prose(docx_path)
@@ -510,28 +420,29 @@ def run_polish(docx_path: Path, *, anthropic_api_key: str,
 
         n_det = sum(1 for f in findings if f.kind == "deterministic")
         n_ling = sum(1 for f in findings if f.kind == "linguistic")
-        grade = _grade(n_det, n_ling)
 
         polished_path: Optional[Path] = None
-        if findings and n_det > 0:
-            polished_path = docx_path.with_name(
-                docx_path.stem + "_polished.docx"
-            )
-            _inject_tracked_changes(docx_path, polished_path, findings)
+        applied = 0
+        if findings:
+            candidate = docx_path.with_name(docx_path.stem + "_polished.docx")
+            applied = _apply_clean_edits(docx_path, candidate, findings)
+            if applied > 0:
+                polished_path = candidate
+            else:
+                # Nothing actually applied - remove the stray copy.
+                candidate.unlink(missing_ok=True)
 
-        punch = _punch_list(findings, grade) if findings else ""
-
-        log.info("Polish grade=%s findings=%d (det=%d, ling=%d)",
-                 grade, len(findings), n_det, n_ling)
+        log.info("Polish: found=%d (det=%d, ling=%d) applied=%d ran_linguistic=%s",
+                 len(findings), n_det, n_ling, applied, ran_ling)
 
         return PolishResult(
-            grade=grade,
+            grade="A" if applied == 0 else "B",
             findings=findings,
-            punch_list_md=punch,
+            punch_list_md="",  # silent mode: no report
             polished_docx=polished_path,
             clean_docx=docx_path,
             ran_linguistic_pass=ran_ling,
         )
     except Exception:
-        log.exception("Polish crashed — degrading to grade A (silent).")
+        log.exception("Polish crashed - skipping silently.")
         return PolishResult(grade="A", clean_docx=docx_path)
