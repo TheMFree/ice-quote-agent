@@ -20,6 +20,7 @@ from agent.extractor import extract_quote_data
 from agent.filler import fill_template
 from agent.logger import setup_logger
 from agent.parsers import parse_attachment, ParsedContent
+from agent.polish import run_polish, PolishResult
 from agent.schema import QuoteData
 
 
@@ -71,6 +72,7 @@ def _review_body(
     original_sender: str,
     original_subject: str,
     original_body: str,
+    polish: Optional[PolishResult] = None,
 ) -> str:
     lines = [
         "Draft quote ready for your review.",
@@ -93,7 +95,7 @@ def _review_body(
         lines += [
             "",
             "Information still needed:",
-            *[f"  • {m}" for m in missing_fields],
+            *[f"  - {m}" for m in missing_fields],
         ]
     if data.extraction_notes:
         lines += ["", f"Extractor notes: {data.extraction_notes}"]
@@ -103,11 +105,26 @@ def _review_body(
         "Review the attached .docx (editable) and .pdf (print/preview), "
         "adjust as needed, then forward to "
         f"{original_sender} (and the client) yourself.",
+    ]
+
+    # Polish punch list (silent when grade == A)
+    if polish is not None and polish.grade != "A" and polish.punch_list_md:
+        lines += [
+            "",
+            "--- Polish Report ---",
+            polish.punch_list_md,
+            "",
+            "The attached .docx contains tracked changes — open in Word, "
+            "review each edit, and Accept/Reject as appropriate before "
+            "sending to the client.",
+        ]
+
+    lines += [
         "",
         "--- Original request ---",
         original_body.strip() or "(empty body)",
         "",
-        "— ICE Quote Agent (automated)",
+        "- ICE Quote Agent (automated)",
     ]
     return "\n".join(lines)
 
@@ -154,9 +171,25 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
         jpath = out_path.with_suffix(".json")
         jpath.write_text(data.model_dump_json(indent=2))
 
+        # Run Polish (final-gate QA). Silent on grade A; tracks changes on B-D.
+        polish = run_polish(
+            out_path,
+            anthropic_api_key=settings.anthropic_api_key,
+            model=settings.claude_model,
+            run_linguistic=True,
+        )
+
+        # Pick the .docx to attach: tracked-changes version if Polish
+        # produced one, otherwise the clean original.
+        docx_to_attach = (polish.polished_docx
+                          if polish.polished_docx is not None
+                          else out_path)
+
+        # Always render the PDF from the clean (pre-polish) .docx so the
+        # PDF preview doesn't show tracked-change markup.
         pdf_path = _convert_to_pdf(out_path, log)
 
-        attachments: List[Path] = [out_path]
+        attachments: List[Path] = [docx_to_attach]
         if pdf_path is not None:
             attachments.append(pdf_path)
 
@@ -167,13 +200,17 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
             original_sender=email.sender,
             original_subject=email.subject,
             original_body=email.body_text,
+            polish=polish,
         )
-        review_subject = f"[Draft Quote for Review] {email.subject}"
+        subject_prefix = "[Draft Quote for Review]"
+        if polish.grade == "D":
+            subject_prefix = "[Draft Quote for Review - POLISH: D]"
+        review_subject = f"{subject_prefix} {email.subject}"
 
         if not settings.reviewer_email:
             raise RuntimeError(
                 "REVIEWER_EMAIL is not set. The agent needs a reviewer to "
-                "send drafts to — set REVIEWER_EMAIL in .env."
+                "send drafts to - set REVIEWER_EMAIL in .env."
             )
 
         if settings.dry_run:
@@ -208,9 +245,9 @@ def run():
     log.info("ICE Quote Agent starting (dry_run=%s, mailbox=%s)",
              settings.dry_run, settings.mailbox or "<not set>")
     if _find_soffice():
-        log.info("LibreOffice detected — PDF generation enabled.")
+        log.info("LibreOffice detected - PDF generation enabled.")
     else:
-        log.warning("LibreOffice not detected — PDF generation disabled. "
+        log.warning("LibreOffice not detected - PDF generation disabled. "
                     "Install with: apt install libreoffice --no-install-recommends")
     settings.output_dir.mkdir(parents=True, exist_ok=True)
 
