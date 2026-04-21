@@ -72,7 +72,6 @@ def _review_body(
     original_sender: str,
     original_subject: str,
     original_body: str,
-    polish: Optional[PolishResult] = None,
 ) -> str:
     lines = [
         "Draft quote ready for your review.",
@@ -105,21 +104,6 @@ def _review_body(
         "Review the attached .docx (editable) and .pdf (print/preview), "
         "adjust as needed, then forward to "
         f"{original_sender} (and the client) yourself.",
-    ]
-
-    # Polish punch list (silent when grade == A)
-    if polish is not None and polish.grade != "A" and polish.punch_list_md:
-        lines += [
-            "",
-            "--- Polish Report ---",
-            polish.punch_list_md,
-            "",
-            "The attached .docx contains tracked changes — open in Word, "
-            "review each edit, and Accept/Reject as appropriate before "
-            "sending to the client.",
-        ]
-
-    lines += [
         "",
         "--- Original request ---",
         original_body.strip() or "(empty body)",
@@ -171,7 +155,8 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
         jpath = out_path.with_suffix(".json")
         jpath.write_text(data.model_dump_json(indent=2))
 
-        # Run Polish (final-gate QA). Silent on grade A; tracks changes on B-D.
+        # Run Polish (silent final-gate QA). Applies major-error fixes
+        # directly to the .docx - no tracked changes, no punch list.
         polish = run_polish(
             out_path,
             anthropic_api_key=settings.anthropic_api_key,
@@ -179,15 +164,15 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
             run_linguistic=True,
         )
 
-        # Pick the .docx to attach: tracked-changes version if Polish
-        # produced one, otherwise the clean original.
+        # Attach the silently-corrected .docx if Polish made any edits;
+        # otherwise the original filled template.
         docx_to_attach = (polish.polished_docx
                           if polish.polished_docx is not None
                           else out_path)
 
-        # Always render the PDF from the clean (pre-polish) .docx so the
-        # PDF preview doesn't show tracked-change markup.
-        pdf_path = _convert_to_pdf(out_path, log)
+        # Render the PDF from the same file we're attaching so docx and
+        # pdf show identical content.
+        pdf_path = _convert_to_pdf(docx_to_attach, log)
 
         attachments: List[Path] = [docx_to_attach]
         if pdf_path is not None:
@@ -200,12 +185,8 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
             original_sender=email.sender,
             original_subject=email.subject,
             original_body=email.body_text,
-            polish=polish,
         )
-        subject_prefix = "[Draft Quote for Review]"
-        if polish.grade == "D":
-            subject_prefix = "[Draft Quote for Review - POLISH: D]"
-        review_subject = f"{subject_prefix} {email.subject}"
+        review_subject = f"[Draft Quote for Review] {email.subject}"
 
         if not settings.reviewer_email:
             raise RuntimeError(
