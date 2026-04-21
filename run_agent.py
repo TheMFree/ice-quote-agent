@@ -82,19 +82,21 @@ def _review_body(
         "--- Extracted summary ---",
     ]
     if data.project:
-        lines.append(f"Project:  {data.project}")
+        lines.append(f"Project:    {data.project}")
     if data.client:
-        lines.append(f"Client:   {data.client}")
+        lines.append(f"Client:     {data.client}")
+    if data.owner_rep:
+        lines.append(f"Owner\u2019s Rep: {data.owner_rep}")
     if data.location:
-        lines.append(f"Location: {data.location}")
+        lines.append(f"Location:   {data.location}")
     if data.total_amount:
-        lines.append(f"Total:    {data.total_amount}")
+        lines.append(f"Total:      {data.total_amount}")
 
     if missing_fields:
         lines += [
             "",
             "Information still needed:",
-            *[f"  - {m}" for m in missing_fields],
+            *[f"  • {m}" for m in missing_fields],
         ]
     if data.extraction_notes:
         lines += ["", f"Extractor notes: {data.extraction_notes}"]
@@ -108,7 +110,7 @@ def _review_body(
         "--- Original request ---",
         original_body.strip() or "(empty body)",
         "",
-        "- ICE Quote Agent (automated)",
+        "— ICE Quote Agent (automated)",
     ]
     return "\n".join(lines)
 
@@ -117,6 +119,7 @@ def _missing_fields(data: QuoteData) -> List[str]:
     missing = []
     if not data.project: missing.append("Project name")
     if not data.client: missing.append("Client name")
+    if not data.owner_rep: missing.append("Owner\u2019s Rep (client-side contact)")
     if not data.location: missing.append("Location")
     if not data.material_amount: missing.append("Material cost")
     if not data.labor_equipment_amount: missing.append("Labor & equipment cost")
@@ -156,7 +159,7 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
         jpath.write_text(data.model_dump_json(indent=2))
 
         # Run Polish (silent final-gate QA). Applies major-error fixes
-        # directly to the .docx - no tracked changes, no punch list.
+        # directly to the .docx — no tracked changes, no punch list.
         polish = run_polish(
             out_path,
             anthropic_api_key=settings.anthropic_api_key,
@@ -191,7 +194,7 @@ def process_email(email: IncomingEmail, settings, log, graph: GraphClient) -> bo
         if not settings.reviewer_email:
             raise RuntimeError(
                 "REVIEWER_EMAIL is not set. The agent needs a reviewer to "
-                "send drafts to - set REVIEWER_EMAIL in .env."
+                "send drafts to — set REVIEWER_EMAIL in .env."
             )
 
         if settings.dry_run:
@@ -226,9 +229,9 @@ def run():
     log.info("ICE Quote Agent starting (dry_run=%s, mailbox=%s)",
              settings.dry_run, settings.mailbox or "<not set>")
     if _find_soffice():
-        log.info("LibreOffice detected - PDF generation enabled.")
+        log.info("LibreOffice detected — PDF generation enabled.")
     else:
-        log.warning("LibreOffice not detected - PDF generation disabled. "
+        log.warning("LibreOffice not detected — PDF generation disabled. "
                     "Install with: apt install libreoffice --no-install-recommends")
     settings.output_dir.mkdir(parents=True, exist_ok=True)
 

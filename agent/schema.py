@@ -24,6 +24,12 @@ class QuoteData(BaseModel):
     agreement_no: Optional[str] = Field(None)
     wbs_no: Optional[str] = Field(None)
     client: Optional[str] = Field(None)
+    owner_rep: Optional[str] = Field(
+        None,
+        description="Client-side project contact — the person at the "
+                    "client company to whom this quote is addressed "
+                    "(e.g. 'John Smith, Project Manager').",
+    )
     location: Optional[str] = Field(None)
     proposal_date: Optional[str] = Field(None)
     quote_no: Optional[str] = None

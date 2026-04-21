@@ -70,6 +70,7 @@ def fill_template(template_path: Path, data: QuoteData, output_path: Path) -> Pa
                 "Agreement No.": data.agreement_no,
                 "WBS #": data.wbs_no,
                 "Client": data.client,
+                "Owner\u2019s Rep": data.owner_rep,
                 "Location": data.location,
                 "Proposal Date": data.proposal_date,
                 "Quote No.": data.quote_no,
